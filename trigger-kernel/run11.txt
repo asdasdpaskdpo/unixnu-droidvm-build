@@ -1,0 +1,27 @@
+attempt 11: the shared region, and the volume the dyld cache is on
+
+What round 10 answered: the cryptex view completes (stage=5, status=0) and the dyld shared cache
+resolves at all three paths dyld could use (errno 0), yet dyld still runs with no cache
+(config.dyldCache.addr == nullptr in dyld4, which is what turns every lookup into "no dyld cache").
+
+That panic fired before dyld ran. This round moves the report to where dyld has actually failed and
+adds the one kernel answer dyld needs first.
+
+0004 bsd/kern/kern_exit.c -- at the initproc panic, print dyld's own exit reason string together
+with __shared_region_map_and_slide's result and the owner chain's stages. dyld maps the cache
+system-wide through that syscall (shared_region_map_and_slide_np); if it is refused, dyld has no
+cache at all and never reports why.
+
+0005 bsd/vm/vm_unix.c -- the stock rule is "the shared cache file must be on the process root's
+volume or in the preboot cryptex" (SHARED_REGION_TRACE_ERROR: "not on process' root volume nor
+preboot volume"). This guest's root is a union of the OS volume and the SystemOS volume, and the
+cache lives on the SystemOS layer, which neither branch accepts -- a refusal there costs the whole
+cache. The edit accepts a file whose mount is the volume the owner chain itself mounted
+(native_owner_cache_mounted_device / native_owner_cache_device_path, both published by
+offline-owner-systemos-mount.patch), and records the syscall's result for the report above.
+
+0003 now panics only at owner-cache-diag=2, so dyld gets to run at the diag=1 this boot uses.
+
+Either outcome is an answer: the syscall result says whether the kernel refused the cache (EPERM
+from that check, or another error) or whether the cache was mapped and dyld failed elsewhere -- and
+if the fix is right, the guest boots past initproc for the first time.

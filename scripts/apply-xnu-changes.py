@@ -24,7 +24,22 @@ applies that patch with all the others.
         Reports the cryptex OS view stages, then asks the VFS whether the dyld shared cache exists at
         each of the three paths dyld might use.  43610287238 showed stage=5 status=0 -- the view is
         complete and a WebKit extension is visible through it -- yet dyld still reports "no dyld
-        cache", so the next question is which of those paths actually resolves.
+        cache".  43613383283 answered the next question (all three paths resolve), and a panic here
+        happens before dyld runs -- so it is a panic only at owner-cache-diag=2, while the initproc
+        report (0004) prints the same variables at 1.
+
+  0004  bsd/kern/kern_exit.c
+        dyld's account of a failure is an exit reason string ("... no dyld cache") and the one thing
+        it needs from the kernel first is the shared region.  At the initproc panic, report dyld's
+        string with __shared_region_map_and_slide's result (0005) and the owner chain's stages: that
+        is the difference between "the kernel refused the cache" and "the cache was mapped and dyld
+        failed later".
+
+  0005  bsd/vm/vm_unix.c
+        The stock "the shared cache must be on the process root's volume or in the preboot cryptex"
+        test has no case for a cache on a volume the owner chain mounted itself (the SystemOS volume,
+        which it union-mounts over the OS volume at "/"), and a refusal there costs dyld the whole
+        cache.  Accept the volume the owner chain recorded, and record the syscall's result for 0004.
 
 usage: apply-xnu-changes.py <xnu source tree>
 """
@@ -133,6 +148,7 @@ def edit_003(text):
         f'{o}extern volatile int native_staged_apps_stage, native_staged_view_stage, native_staged_view_status;\n'
         f'{o}extern volatile int native_owner_boot_manifest_status;\n'
         f'{o}extern char native_owner_cache_device_path[64];\n'
+        f'{o}extern int PE_parse_boot_argn(const char *, void *, int);\n'
         f'{o}/* Ask the kernel which of the three places dyld might look actually has the cache.\n'
         f'{o} * The real typedefs, not void*: a conflicting redeclaration of vnode_lookup would not\n'
         f'{o} * compile, and kern_exec.c already has these headers (it mounts and looks up paths). */\n'
@@ -145,22 +161,134 @@ def edit_003(text):
         f'{o}if (!c2) {{ vnode_put(vp); vp = NULLVP; }}\n'
         f'{o}c3 = vnode_lookup("/private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64", 0, &vp, vctx);\n'
         f'{o}if (!c3) {{ vnode_put(vp); vp = NULLVP; }}\n'
-        f'{o}/* Unconditional on purpose: a gated panic left "did the owner chain succeed, or did the\n'
-        f'{o} * boot argument not parse?" open (43606725375), and this build exists only to answer it. */\n'
-        f'{o}panic("DroidVM cryptex: cache=%d/%d/%d stage=%d status=%d addon=%d/%d addon2=%d/%d addon3=%d/%d "\n'
-        f'{o}    "owner=%d/%d/%d data=%d/%d staged=%d/%d/%d manifest=%d path=%s",\n'
-        f'{o}    c1, c2, c3,\n'
-        f'{o}    native_cryptex_os_stage, native_cryptex_os_status,\n'
-        f'{o}    native_gpu_addon_stage, native_gpu_addon_status,\n'
-        f'{o}    native_gpu_addon2_stage, native_gpu_addon2_status,\n'
-        f'{o}    native_gpu_addon3_stage, native_gpu_addon3_status,\n'
-        f'{o}    native_owner_cache_stage, native_owner_cache_status, native_owner_cache_mount_status,\n'
-        f'{o}    native_owner_data_stage, native_owner_data_status,\n'
-        f'{o}    native_staged_apps_stage, native_staged_view_stage, native_staged_view_status,\n'
-        f'{o}    native_owner_boot_manifest_status, native_owner_cache_device_path);\n'
+        f'{o}/* owner-cache-diag=2 asks for this panic.  At 1 the same variables are printed by the\n'
+        f'{o} * initproc report (kern_exit.c), because a panic here happens before dyld runs and the\n'
+        f'{o} * question is what dyld does with these volumes, not whether they resolve. */\n'
+        f'{o}int diag = 0;\n'
+        f'{o}if (PE_parse_boot_argn("owner-cache-diag", &diag, sizeof(diag)) && diag >= 2) {{\n'
+        f'{o}\tpanic("DroidVM cryptex: cache=%d/%d/%d stage=%d status=%d addon=%d/%d addon2=%d/%d addon3=%d/%d "\n'
+        f'{o}\t    "owner=%d/%d/%d data=%d/%d staged=%d/%d/%d manifest=%d path=%s",\n'
+        f'{o}\t    c1, c2, c3,\n'
+        f'{o}\t    native_cryptex_os_stage, native_cryptex_os_status,\n'
+        f'{o}\t    native_gpu_addon_stage, native_gpu_addon_status,\n'
+        f'{o}\t    native_gpu_addon2_stage, native_gpu_addon2_status,\n'
+        f'{o}\t    native_gpu_addon3_stage, native_gpu_addon3_status,\n'
+        f'{o}\t    native_owner_cache_stage, native_owner_cache_status, native_owner_cache_mount_status,\n'
+        f'{o}\t    native_owner_data_stage, native_owner_data_status,\n'
+        f'{o}\t    native_staged_apps_stage, native_staged_view_stage, native_staged_view_status,\n'
+        f'{o}\t    native_owner_boot_manifest_status, native_owner_cache_device_path);\n'
+        f'{o}}}\n'
         f'{ind}}}\n'
     )
     return text[:line_start] + block + text[first + len(anchor):], True
+
+
+def edit_004(text):
+    """Return kern_exit.c with the initproc panic reporting the dyld-cache side of the failure."""
+    anchor = '\tproc_crash_coredump(p);\n'
+    first = text.find(anchor)
+    if first < 0:
+        return text, False
+    block = (
+        '\t/*\n'
+        '\t * DroidVM: dyld\'s account of a failure is an exit reason string, and the one thing it\n'
+        '\t * needs from the kernel before any lookup is the shared region: __shared_region_map_and_slide\n'
+        '\t * (vm_unix.c records its result in droidvm_sr_*).  If that call was refused, dyld runs with\n'
+        '\t * no cache at all and every later message blames "no dyld cache".  Report it together with\n'
+        '\t * the owner chain\'s stages, which the cryptex diagnostic used to report from before dyld.\n'
+        '\t */\n'
+        '\tif (p == initproc) {\n'
+        '\t\textern int droidvm_sr_calls, droidvm_sr_files, droidvm_sr_mappings, droidvm_sr_result;\n'
+        '\t\textern volatile int native_cryptex_os_stage, native_cryptex_os_status;\n'
+        '\t\textern volatile int native_gpu_addon3_stage, native_gpu_addon3_status;\n'
+        '\t\textern volatile int native_owner_cache_stage, native_owner_cache_status;\n'
+        '\t\textern volatile int native_owner_cache_native_union;\n'
+        '\t\tpanic("DroidVM initproc: %s: %.160s | sr=%d(f%d/m%d)=%d cryptex=%d/%d addon3=%d/%d "\n'
+        '\t\t    "owner=%d/%d union=%d",\n'
+        '\t\t    prefix_str, exit_reason_desc ? exit_reason_desc : "none",\n'
+        '\t\t    droidvm_sr_calls, droidvm_sr_files, droidvm_sr_mappings, droidvm_sr_result,\n'
+        '\t\t    native_cryptex_os_stage, native_cryptex_os_status,\n'
+        '\t\t    native_gpu_addon3_stage, native_gpu_addon3_status,\n'
+        '\t\t    native_owner_cache_stage, native_owner_cache_status,\n'
+        '\t\t    native_owner_cache_native_union);\n'
+        '\t}\n'
+    )
+    return text[:first] + block + text[first:], True
+
+
+def edit_005(text):
+    """Return vm_unix.c accepting the owner cache volume, and recording the syscall's result."""
+    fn_anchor = 'static int\n_shared_region_map_and_slide(\n'
+    cond_anchor = '\t\tif (srfmp->vp->v_mount != rdir_vp->v_mount) {\n'
+    call_anchor = ('\tkr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);\n'
+                   'done:\n')
+    if text.find(fn_anchor) < 0 or text.find(cond_anchor) < 0 or text.find(call_anchor) < 0:
+        return text, False
+
+    helper = (
+        '/*\n'
+        ' * DroidVM: the dyld cache lives in the SystemOS volume, which the owner chain mounted itself\n'
+        ' * and composed into the root ("it union-mounts the SystemOS volume over the OS volume at /").\n'
+        ' * The stock test below accepts only the process root\'s own volume or the preboot cryptex, so\n'
+        ' * a cache on that layer is refused, vm_shared_region_map_file() never runs, and dyld is left\n'
+        ' * with no cache at all -- every lookup then says "no dyld cache", which is what the guest\n'
+        ' * reported while every cache path still resolved.  Accept the volume the owner chain mounted\n'
+        ' * as its cache: native_owner_cache_device_path is the device it mounted, and nothing else can\n'
+        ' * match it, so an ordinary kernel keeps the stock rule.\n'
+        ' */\n'
+        'int droidvm_sr_calls = 0;\n'
+        'int droidvm_sr_files = 0;\n'
+        'int droidvm_sr_mappings = 0;\n'
+        'int droidvm_sr_result = 0;\n'
+        '\n'
+        'static boolean_t\n'
+        'droidvm_owner_cache_volume(vnode_t vp)\n'
+        '{\n'
+        '\textern volatile dev_t native_owner_cache_mounted_device;\n'
+        '\textern char native_owner_cache_device_path[64];\n'
+        '\tmount_t m;\n'
+        '\tstruct vfsstatfs *sf;\n'
+        '\tvnode_t devvp;\n'
+        '\tdev_t dev;\n'
+        '\tsize_t len;\n'
+        '\n'
+        '\tif (vp == NULLVP || (m = vnode_mount(vp)) == NULL) {\n'
+        '\t\treturn FALSE;\n'
+        '\t}\n'
+        '\t/* The device the owner chain mounted as its cache. */\n'
+        '\tif ((devvp = vfs_devvp(m)) != NULLVP) {\n'
+        '\t\tdev = vnode_specrdev(devvp);\n'
+        '\t\tvnode_put(devvp);\n'
+        '\t\tif (dev != NODEV && dev == native_owner_cache_mounted_device) {\n'
+        '\t\t\treturn TRUE;\n'
+        '\t\t}\n'
+        '\t}\n'
+        '\t/* ... or, when the device is not the one it recorded, the path it mounted. */\n'
+        '\tlen = strnlen(native_owner_cache_device_path, sizeof(native_owner_cache_device_path));\n'
+        '\tif (len == 0 || (sf = vfs_statfs(m)) == NULL) {\n'
+        '\t\treturn FALSE;\n'
+        '\t}\n'
+        '\treturn strncmp(sf->f_mntfromname, native_owner_cache_device_path, len) == 0 &&\n'
+        '\t    sf->f_mntfromname[len] == \'\\0\';\n'
+        '}\n'
+        '\n'
+    )
+    text = text.replace(fn_anchor, helper + fn_anchor, 1)
+    text = text.replace(
+        cond_anchor,
+        '\t\tif (!droidvm_owner_cache_volume(srfmp->vp) &&\n'
+        '\t\t    srfmp->vp->v_mount != rdir_vp->v_mount) {\n', 1)
+    text = text.replace(
+        call_anchor,
+        '\tkr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);\n'
+        '\t/* DroidVM: what dyld is told.  A failure here is the difference between a guest with the\n'
+        '\t * dyld cache mapped and one whose every lookup answers "no dyld cache". */\n'
+        '\tdroidvm_sr_calls++;\n'
+        '\tdroidvm_sr_files = (int)files_count;\n'
+        '\tdroidvm_sr_mappings = (int)mappings_count;\n'
+        '\tdroidvm_sr_result = (int)kr;\n'
+        'done:\n', 1)
+    return text, True
 
 
 def main():
@@ -201,6 +329,31 @@ def main():
         new, applied = edit_003(text)
         check('cryptex anchor found', applied, 'no "native_cryptex_os_view(p, scratch);"')
         check('cryptex panic present', 'DroidVM cryptex:' in new, 'replacement did not land')
+        if applied:
+            path.write_text(new)
+
+    print('0004 bsd/kern/kern_exit.c (initproc report)')
+    path, text = read(tree, 'bsd/kern/kern_exit.c')
+    if 'DroidVM initproc:' in text:
+        print('  ok    already applied')
+    else:
+        new, applied = edit_004(text)
+        check('initproc anchor found', applied, 'no "\tproc_crash_coredump(p);"')
+        check('initproc report present', 'DroidVM initproc:' in new, 'replacement did not land')
+        if applied:
+            path.write_text(new)
+
+    print('0005 bsd/vm/vm_unix.c (owner cache volume and the syscall result)')
+    path, text = read(tree, 'bsd/vm/vm_unix.c')
+    if 'droidvm_owner_cache_volume' in text:
+        print('  ok    already applied')
+    else:
+        new, applied = edit_005(text)
+        check('vm_unix anchors found', applied,
+              'one of the three vm_unix.c anchors is missing: the patched source changed')
+        check('helper present', 'droidvm_owner_cache_volume' in new, 'helper did not land')
+        check('condition changed', '!droidvm_owner_cache_volume(srfmp->vp) &&' in new, 'condition not rewritten')
+        check('recorder present', 'droidvm_sr_result = (int)kr;' in new, 'recorder did not land')
         if applied:
             path.write_text(new)
 
