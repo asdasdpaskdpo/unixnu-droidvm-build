@@ -1,0 +1,20 @@
+attempt 13: a recorder that can only assign, and the initproc report
+
+Two rounds died in "Build the kernel" with no compiler diagnostic in the job log (the step log is cut
+to 55 lines; the build's own log stays on the runner), so the only thing to do is remove everything
+that could plausibly fail to compile and keep the part that answers the question.
+
+0005 is now four globals in bsd/vm/vm_unix.c and four assignments at the return of
+__shared_region_map_and_slide: calls, file count, mapping count, and the kern_return_t dyld sees.
+No VFS calls, no helper, no struct access.
+
+0004 prints them at the initproc panic, with the stages it already had:
+
+  DroidVM initproc: initproc failed to start: <dyld's exit reason> | sr=CALLS(fFILES/mMAPS)=RESULT
+                    cryptex=5/0 addon3=1/2 owner=6/0 union=U
+
+RESULT is the answer to "did the kernel refuse the dyld cache". 0 = the mapping succeeded and dyld
+broke later (then it is memory, the 16 KiB slide, or the seed); EPERM(1) = the "not on the process
+root's volume nor preboot volume" test; anything else names its own stage. union says whether the
+owner chain's MNT_UNION actually took (rootvnode == the SystemOS mount), which is what decides whether
+that test can even fire for a cache on the SystemOS volume.

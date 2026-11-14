@@ -199,16 +199,14 @@ def edit_004(text):
         '\t */\n'
         '\tif (p == initproc) {\n'
         '\t\textern int droidvm_sr_calls, droidvm_sr_files, droidvm_sr_mappings, droidvm_sr_result;\n'
-        '\t\textern int droidvm_sr_refusals, droidvm_sr_file_dev, droidvm_sr_root_dev;\n'
         '\t\textern volatile int native_cryptex_os_stage, native_cryptex_os_status;\n'
         '\t\textern volatile int native_gpu_addon3_stage, native_gpu_addon3_status;\n'
         '\t\textern volatile int native_owner_cache_stage, native_owner_cache_status;\n'
         '\t\textern volatile int native_owner_cache_native_union;\n'
-        '\t\tpanic("DroidVM initproc: %s: %.160s | sr=%d(f%d/m%d)=%d refuse=%d fdev=%d rdev=%d "\n'
-        '\t\t    "cryptex=%d/%d addon3=%d/%d owner=%d/%d union=%d",\n'
+        '\t\tpanic("DroidVM initproc: %s: %.160s | sr=%d(f%d/m%d)=%d cryptex=%d/%d addon3=%d/%d "\n'
+        '\t\t    "owner=%d/%d union=%d",\n'
         '\t\t    prefix_str, exit_reason_desc ? exit_reason_desc : "none",\n'
         '\t\t    droidvm_sr_calls, droidvm_sr_files, droidvm_sr_mappings, droidvm_sr_result,\n'
-        '\t\t    droidvm_sr_refusals, droidvm_sr_file_dev, droidvm_sr_root_dev,\n'
         '\t\t    native_cryptex_os_stage, native_cryptex_os_status,\n'
         '\t\t    native_gpu_addon3_stage, native_gpu_addon3_status,\n'
         '\t\t    native_owner_cache_stage, native_owner_cache_status,\n'
@@ -219,77 +217,37 @@ def edit_004(text):
 
 
 def edit_005(text):
-    """Return vm_unix.c accepting the owner cache volume, and recording why the shared region failed.
+    """Return vm_unix.c recording what __shared_region_map_and_slide decided.
 
-    Three anchors, all plain statements: the _shared_region_map_and_slide() definition (for the
-    globals and helpers), the "must be on the process root's volume" test (for the acceptance and the
-    refusal counter) and the call in the syscall wrapper (for the result dyld sees)."""
-    fn_anchor = 'static int\n_shared_region_map_and_slide(\n'
-    cond_anchor = '\t\tif (srfmp->vp->v_mount != rdir_vp->v_mount) {\n'
+    Nothing here calls into the VFS: four globals and four assignments at the syscall's return, which
+    is what the initproc report needs to say whether the kernel refused the dyld cache (and with which
+    errno) or mapped it and dyld failed later.  Two rounds died in the bsd build on a richer version
+    of this edit (strnlen/struct vfsstatfs, then an unproven helper); a recorder that only assigns
+    cannot be the reason a kernel does not compile."""
     call_anchor = ('\tkr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);\n'
                    'done:\n')
-    for anchor in (fn_anchor, cond_anchor, call_anchor):
+    fn_anchor = 'static int\n_shared_region_map_and_slide(\n'
+    for anchor in (call_anchor, fn_anchor):
         if text.find(anchor) < 0:
             return text, False
 
-    helper = (
+    globals_ = (
         '/*\n'
-        ' * DroidVM: the dyld cache lives on the SystemOS volume, which the owner chain mounted itself\n'
-        ' * and put over the OS volume at "/".  The stock test below accepts only "the same mount as the\n'
-        ' * process root" or the preboot cryptex, and a refusal there fails the whole\n'
-        ' * __shared_region_map_and_slide -- dyld then runs with no cache at all ("no dyld cache" for\n'
-        ' * every lookup), which is what this guest reported while every cache path still resolved.\n'
-        ' * Accept the volume the owner chain mounted as its cache; nothing else matches it, so an\n'
-        ' * ordinary kernel keeps the stock rule.  The four droidvm_sr_* values are what the initproc\n'
-        ' * report prints, and they say whether a refusal happened at all.\n'
+        ' * DroidVM: what dyld is told.  __shared_region_map_and_slide_2_np is the only way dyld gets\n'
+        ' * the shared cache mapped system-wide, and a failure there leaves it with no cache at all\n'
+        ' * ("no dyld cache" for every lookup, which is what this guest reported while every cache path\n'
+        ' * still resolved).  The value is dumped by the initproc report in kern_exit.c.\n'
         ' */\n'
         'int droidvm_sr_calls = 0;\n'
         'int droidvm_sr_files = 0;\n'
         'int droidvm_sr_mappings = 0;\n'
         'int droidvm_sr_result = 0;\n'
-        'int droidvm_sr_refusals = 0;\n'
-        'int droidvm_sr_file_dev = -1;\n'
-        'int droidvm_sr_root_dev = -1;\n'
-        '\n'
-        'static dev_t\n'
-        'droidvm_vnode_device(vnode_t vp)\n'
-        '{\n'
-        '\tmount_t m;\n'
-        '\tvnode_t devvp;\n'
-        '\tdev_t dev;\n'
-        '\n'
-        '\tif (vp == NULLVP || (m = vnode_mount(vp)) == NULL ||\n'
-        '\t    (devvp = vfs_devvp(m)) == NULLVP) {\n'
-        '\t\treturn NODEV;\n'
-        '\t}\n'
-        '\tdev = vnode_specrdev(devvp);\n'
-        '\tvnode_put(devvp);\n'
-        '\treturn dev;\n'
-        '}\n'
-        '\n'
-        'static boolean_t\n'
-        'droidvm_owner_cache_volume(vnode_t vp)\n'
-        '{\n'
-        '\textern volatile dev_t native_owner_cache_mounted_device;\n'
-        '\tdev_t dev = droidvm_vnode_device(vp);\n'
-        '\n'
-        '\treturn dev != NODEV && dev == native_owner_cache_mounted_device;\n'
-        '}\n'
         '\n'
     )
-    text = text.replace(fn_anchor, helper + fn_anchor, 1)
-    text = text.replace(
-        cond_anchor,
-        '\t\tdroidvm_sr_file_dev = (int)droidvm_vnode_device(srfmp->vp);\n'
-        '\t\tdroidvm_sr_root_dev = (int)droidvm_vnode_device(rdir_vp);\n'
-        '\t\tif (!droidvm_owner_cache_volume(srfmp->vp) &&\n'
-        '\t\t    srfmp->vp->v_mount != rdir_vp->v_mount) {\n'
-        '\t\t\tdroidvm_sr_refusals++;\n', 1)
+    text = text.replace(fn_anchor, globals_ + fn_anchor, 1)
     text = text.replace(
         call_anchor,
         '\tkr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);\n'
-        '\t/* DroidVM: what dyld is told.  A failure here is the difference between a guest with the\n'
-        '\t * dyld cache mapped and one whose every lookup answers "no dyld cache". */\n'
         '\tdroidvm_sr_calls++;\n'
         '\tdroidvm_sr_files = (int)files_count;\n'
         '\tdroidvm_sr_mappings = (int)mappings_count;\n'
@@ -350,17 +308,16 @@ def main():
         if applied:
             path.write_text(new)
 
-    print('0005 bsd/vm/vm_unix.c (owner cache volume and the syscall result)')
+    print('0005 bsd/vm/vm_unix.c (the shared region result dyld sees)')
     path, text = read(tree, 'bsd/vm/vm_unix.c')
-    if 'droidvm_owner_cache_volume' in text:
+    if 'droidvm_sr_result' in text:
         print('  ok    already applied')
     else:
         new, applied = edit_005(text)
         check('vm_unix anchors found', applied,
-              'one of the three vm_unix.c anchors is missing: the patched source changed')
-        check('helper present', 'droidvm_owner_cache_volume' in new, 'helper did not land')
-        check('condition changed', '!droidvm_owner_cache_volume(srfmp->vp) &&' in new, 'condition not rewritten')
+              'the _shared_region_map_and_slide anchors are missing: the patched source changed')
         check('recorder present', 'droidvm_sr_result = (int)kr;' in new, 'recorder did not land')
+        check('counts present', 'droidvm_sr_mappings = (int)mappings_count;' in new, 'counts did not land')
         if applied:
             path.write_text(new)
 
