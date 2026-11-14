@@ -1,0 +1,21 @@
+attempt 12: same question, a helper that cannot fail to compile, and the volumes it refused
+
+Run 43642040684 got all five edits into the patch (151 insertions, 4 files) and then died inside the
+bsd build with no compiler diagnostic in the log. The likely cause is droidvm_owner_cache_volume():
+it called strnlen() and named struct vfsstatfs, and neither is declared for that translation unit
+(implicit declaration is an error in this clang). So the helper now only uses what vm_unix.c already
+has: vnode_mount(), vfs_devvp(), vnode_specrdev(), vnode_put(), NODEV -- the same calls
+offline-owner-systemos-mount.patch itself makes in the same file.
+
+And it reports what it saw. At the "not on process' root volume nor preboot volume" test the kernel
+now records, per file, the device of the file's mount and of the process root, and counts refusals:
+
+  DroidVM initproc: initproc failed to start: ... | sr=CALLS(fFILES/mMAPS)=RESULT refuse=N
+                    fdev=DEV rdev=DEV cryptex=5/0 addon3=1/2 owner=6/0 union=U
+
+That single line answers both questions at once: RESULT says whether
+__shared_region_map_and_slide succeeded (0 means the kernel was never the problem and dyld broke
+later; 1 = EPERM = this test refused, and fdev/rdev then say on which volume the cache file and the
+root actually are), and refuse tells whether the acceptance in 0005 fired at all.
+
+0003 stays a panic only at owner-cache-diag=2, so this boot runs dyld.

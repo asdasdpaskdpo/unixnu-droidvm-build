@@ -199,14 +199,16 @@ def edit_004(text):
         '\t */\n'
         '\tif (p == initproc) {\n'
         '\t\textern int droidvm_sr_calls, droidvm_sr_files, droidvm_sr_mappings, droidvm_sr_result;\n'
+        '\t\textern int droidvm_sr_refusals, droidvm_sr_file_dev, droidvm_sr_root_dev;\n'
         '\t\textern volatile int native_cryptex_os_stage, native_cryptex_os_status;\n'
         '\t\textern volatile int native_gpu_addon3_stage, native_gpu_addon3_status;\n'
         '\t\textern volatile int native_owner_cache_stage, native_owner_cache_status;\n'
         '\t\textern volatile int native_owner_cache_native_union;\n'
-        '\t\tpanic("DroidVM initproc: %s: %.160s | sr=%d(f%d/m%d)=%d cryptex=%d/%d addon3=%d/%d "\n'
-        '\t\t    "owner=%d/%d union=%d",\n'
+        '\t\tpanic("DroidVM initproc: %s: %.160s | sr=%d(f%d/m%d)=%d refuse=%d fdev=%d rdev=%d "\n'
+        '\t\t    "cryptex=%d/%d addon3=%d/%d owner=%d/%d union=%d",\n'
         '\t\t    prefix_str, exit_reason_desc ? exit_reason_desc : "none",\n'
         '\t\t    droidvm_sr_calls, droidvm_sr_files, droidvm_sr_mappings, droidvm_sr_result,\n'
+        '\t\t    droidvm_sr_refusals, droidvm_sr_file_dev, droidvm_sr_root_dev,\n'
         '\t\t    native_cryptex_os_stage, native_cryptex_os_status,\n'
         '\t\t    native_gpu_addon3_stage, native_gpu_addon3_status,\n'
         '\t\t    native_owner_cache_stage, native_owner_cache_status,\n'
@@ -217,67 +219,72 @@ def edit_004(text):
 
 
 def edit_005(text):
-    """Return vm_unix.c accepting the owner cache volume, and recording the syscall's result."""
+    """Return vm_unix.c accepting the owner cache volume, and recording why the shared region failed.
+
+    Three anchors, all plain statements: the _shared_region_map_and_slide() definition (for the
+    globals and helpers), the "must be on the process root's volume" test (for the acceptance and the
+    refusal counter) and the call in the syscall wrapper (for the result dyld sees)."""
     fn_anchor = 'static int\n_shared_region_map_and_slide(\n'
     cond_anchor = '\t\tif (srfmp->vp->v_mount != rdir_vp->v_mount) {\n'
     call_anchor = ('\tkr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);\n'
                    'done:\n')
-    if text.find(fn_anchor) < 0 or text.find(cond_anchor) < 0 or text.find(call_anchor) < 0:
-        return text, False
+    for anchor in (fn_anchor, cond_anchor, call_anchor):
+        if text.find(anchor) < 0:
+            return text, False
 
     helper = (
         '/*\n'
-        ' * DroidVM: the dyld cache lives in the SystemOS volume, which the owner chain mounted itself\n'
-        ' * and composed into the root ("it union-mounts the SystemOS volume over the OS volume at /").\n'
-        ' * The stock test below accepts only the process root\'s own volume or the preboot cryptex, so\n'
-        ' * a cache on that layer is refused, vm_shared_region_map_file() never runs, and dyld is left\n'
-        ' * with no cache at all -- every lookup then says "no dyld cache", which is what the guest\n'
-        ' * reported while every cache path still resolved.  Accept the volume the owner chain mounted\n'
-        ' * as its cache: native_owner_cache_device_path is the device it mounted, and nothing else can\n'
-        ' * match it, so an ordinary kernel keeps the stock rule.\n'
+        ' * DroidVM: the dyld cache lives on the SystemOS volume, which the owner chain mounted itself\n'
+        ' * and put over the OS volume at "/".  The stock test below accepts only "the same mount as the\n'
+        ' * process root" or the preboot cryptex, and a refusal there fails the whole\n'
+        ' * __shared_region_map_and_slide -- dyld then runs with no cache at all ("no dyld cache" for\n'
+        ' * every lookup), which is what this guest reported while every cache path still resolved.\n'
+        ' * Accept the volume the owner chain mounted as its cache; nothing else matches it, so an\n'
+        ' * ordinary kernel keeps the stock rule.  The four droidvm_sr_* values are what the initproc\n'
+        ' * report prints, and they say whether a refusal happened at all.\n'
         ' */\n'
         'int droidvm_sr_calls = 0;\n'
         'int droidvm_sr_files = 0;\n'
         'int droidvm_sr_mappings = 0;\n'
         'int droidvm_sr_result = 0;\n'
+        'int droidvm_sr_refusals = 0;\n'
+        'int droidvm_sr_file_dev = -1;\n'
+        'int droidvm_sr_root_dev = -1;\n'
+        '\n'
+        'static dev_t\n'
+        'droidvm_vnode_device(vnode_t vp)\n'
+        '{\n'
+        '\tmount_t m;\n'
+        '\tvnode_t devvp;\n'
+        '\tdev_t dev;\n'
+        '\n'
+        '\tif (vp == NULLVP || (m = vnode_mount(vp)) == NULL ||\n'
+        '\t    (devvp = vfs_devvp(m)) == NULLVP) {\n'
+        '\t\treturn NODEV;\n'
+        '\t}\n'
+        '\tdev = vnode_specrdev(devvp);\n'
+        '\tvnode_put(devvp);\n'
+        '\treturn dev;\n'
+        '}\n'
         '\n'
         'static boolean_t\n'
         'droidvm_owner_cache_volume(vnode_t vp)\n'
         '{\n'
         '\textern volatile dev_t native_owner_cache_mounted_device;\n'
-        '\textern char native_owner_cache_device_path[64];\n'
-        '\tmount_t m;\n'
-        '\tstruct vfsstatfs *sf;\n'
-        '\tvnode_t devvp;\n'
-        '\tdev_t dev;\n'
-        '\tsize_t len;\n'
+        '\tdev_t dev = droidvm_vnode_device(vp);\n'
         '\n'
-        '\tif (vp == NULLVP || (m = vnode_mount(vp)) == NULL) {\n'
-        '\t\treturn FALSE;\n'
-        '\t}\n'
-        '\t/* The device the owner chain mounted as its cache. */\n'
-        '\tif ((devvp = vfs_devvp(m)) != NULLVP) {\n'
-        '\t\tdev = vnode_specrdev(devvp);\n'
-        '\t\tvnode_put(devvp);\n'
-        '\t\tif (dev != NODEV && dev == native_owner_cache_mounted_device) {\n'
-        '\t\t\treturn TRUE;\n'
-        '\t\t}\n'
-        '\t}\n'
-        '\t/* ... or, when the device is not the one it recorded, the path it mounted. */\n'
-        '\tlen = strnlen(native_owner_cache_device_path, sizeof(native_owner_cache_device_path));\n'
-        '\tif (len == 0 || (sf = vfs_statfs(m)) == NULL) {\n'
-        '\t\treturn FALSE;\n'
-        '\t}\n'
-        '\treturn strncmp(sf->f_mntfromname, native_owner_cache_device_path, len) == 0 &&\n'
-        '\t    sf->f_mntfromname[len] == \'\\0\';\n'
+        '\treturn dev != NODEV && dev == native_owner_cache_mounted_device;\n'
         '}\n'
         '\n'
     )
     text = text.replace(fn_anchor, helper + fn_anchor, 1)
     text = text.replace(
         cond_anchor,
+        '\t\tdroidvm_sr_file_dev = (int)droidvm_vnode_device(srfmp->vp);\n'
+        '\t\tdroidvm_sr_root_dev = (int)droidvm_vnode_device(rdir_vp);\n'
         '\t\tif (!droidvm_owner_cache_volume(srfmp->vp) &&\n'
-        '\t\t    srfmp->vp->v_mount != rdir_vp->v_mount) {\n', 1)
+        '\t\t    srfmp->vp->v_mount != rdir_vp->v_mount) {\n'
+        '\t\t\tdroidvm_sr_refusals++;\n', 1)
     text = text.replace(
         call_anchor,
         '\tkr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);\n'
