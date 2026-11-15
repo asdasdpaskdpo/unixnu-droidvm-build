@@ -50,6 +50,9 @@ jobs:
     timeout-minutes: 350
 
     steps:
+      # Without this the workspace is empty and scripts/build_shim.sh is missing (run 43738021608).
+      - uses: actions/checkout@v4
+
       - name: What we are building
         run: |
           echo "stage        ${{ inputs.stage }}"
