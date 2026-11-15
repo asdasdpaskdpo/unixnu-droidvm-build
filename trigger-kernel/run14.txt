@@ -1,0 +1,16 @@
+run14: pinpoint the shared-region EINVAL
+
+On the phone, run13's recorder reads live from guest RAM:
+
+  droidvm_sr_calls=2  files=54  mappings=62  result=22 (EINVAL)
+
+so __shared_region_map_and_slide_2_np is refused by the kernel; dyld gets no cache at all.
+The stock "cache must be on the root volume" test returns EPERM (1), not 22, and a
+one-instruction binary patch making cs_system_enforcement() return 0 changed nothing
+(result stayed 22).  So it is neither of those two.
+
+0006 numbers every `goto done` in shared_region_map_and_slide_setup(), records the
+errno it returned, and records vm_shared_region_map_file()'s raw kern_return_t.
+The build log prints the stage-number -> branch map for the tree actually compiled.
+
+Still only kernel.macho in the release.  No workflow changes.

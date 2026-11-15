@@ -36,10 +36,14 @@ applies that patch with all the others.
         failed later".
 
   0005  bsd/vm/vm_unix.c
-        The stock "the shared cache must be on the process root's volume or in the preboot cryptex"
-        test has no case for a cache on a volume the owner chain mounted itself (the SystemOS volume,
-        which it union-mounts over the OS volume at "/"), and a refusal there costs dyld the whole
-        cache.  Accept the volume the owner chain recorded, and record the syscall's result for 0004.
+        Record what __shared_region_map_and_slide returned (calls / files / mappings / result) for
+        0004.  On the phone it read sr=2(f54/m62)=22: the syscall runs twice and fails with EINVAL,
+        i.e. the kernel refuses the dyld cache.  That rules out the stock root-volume test (EPERM).
+
+  0006  bsd/vm/vm_unix.c
+        EINVAL has two dozen possible sources.  Number every `goto done` in setup(), remember its
+        errno, and record vm_shared_region_map_file()'s raw kern_return_t, so a live read of
+        droidvm_sr_stage / droidvm_sr_setup_error / droidvm_sr_vmkr names the exact branch.
 
 usage: apply-xnu-changes.py <xnu source tree>
 """
@@ -256,6 +260,66 @@ def edit_005(text):
     return text, True
 
 
+def edit_006(text):
+    """Return vm_unix.c recording which shared-region check refused the dyld cache.
+
+    0005 says only that the syscall returned EINVAL (22).  setup() has two dozen
+    `goto done` sites and the caller turns any vm_shared_region_map_file() failure
+    into that same EINVAL, so one number is not enough to choose a fix.  Record the
+    branch index, the errno setup() returned, and the raw kern_return_t -- all plain
+    assignments to file-scope ints, readable live from guest RAM after boot.
+    """
+    definition = '\nshared_region_map_and_slide_setup(\n'
+    fn_start = text.find(definition)
+    fn_end = text.find('\n_shared_region_map_and_slide(', fn_start)
+    if fn_start < 0 or fn_end < 0:
+        return text, False
+
+    globals_ = (
+        '/*\n'
+        ' * DroidVM: which check in shared_region_map_and_slide_setup() turned dyld away.\n'
+        ' * sr_stage is the 1-based index of that function\'s `goto done` sites,\n'
+        ' * sr_setup_error the errno it returned, sr_vmkr the raw kern_return_t from\n'
+        ' * vm_shared_region_map_file() (-1 when setup failed first).  Live-readable.\n'
+        ' */\n'
+        'int droidvm_sr_stage = 0;\n'
+        'int droidvm_sr_setup_error = 0;\n'
+        'int droidvm_sr_vmkr = -1;\n'
+        '\n'
+    )
+    text = text[:fn_start + 1] + globals_ + text[fn_start + 1:]
+
+    # Recompute the span: the comment above mentions setup() but not the definition line.
+    fn_start = text.find(definition)
+    fn_end = text.find('\n_shared_region_map_and_slide(', fn_start)
+    span = text[fn_start:fn_end]
+    counter = [0]
+
+    def mark(m):
+        counter[0] += 1
+        # The CI tree carries UniXNU's own vm_unix.c patches, so the branch numbering can only
+        # be interpreted against the tree actually compiled.  Print the map into the build log.
+        before = [x.strip() for x in span[:m.start()].splitlines()[-5:] if x.strip()]
+        print('    0006 stage %2d: %s' % (counter[0], ' | '.join(before)[-170:]))
+        # Both statements stay on one line: several callers use an unbraced `if (error) goto done;`.
+        return '%sdroidvm_sr_stage = %d; goto done;' % (m.group(1), counter[0])
+
+    span, n = re.subn(r'(?m)^([ \t]*)goto done;[ \t]*$', mark, span)
+    if n < 10:
+        return text, False
+    label = 'done:\n\tif (error != 0) {'
+    if label not in span:
+        return text, False
+    span = span.replace(label, 'done:\n\tdroidvm_sr_setup_error = (int)error;\n\tif (error != 0) {', 1)
+    text = text[:fn_start] + span + text[fn_end:]
+
+    kr_anchor = '\tkr = vm_shared_region_map_file(shared_region, files_count, sr_file_mappings);\n'
+    if kr_anchor not in text:
+        return text, False
+    text = text.replace(kr_anchor, kr_anchor + '\tdroidvm_sr_vmkr = (int)kr;\n', 1)
+    return text, True
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit(__doc__)
@@ -318,6 +382,21 @@ def main():
               'the _shared_region_map_and_slide anchors are missing: the patched source changed')
         check('recorder present', 'droidvm_sr_result = (int)kr;' in new, 'recorder did not land')
         check('counts present', 'droidvm_sr_mappings = (int)mappings_count;' in new, 'counts did not land')
+        if applied:
+            path.write_text(new)
+
+    print('0006 bsd/vm/vm_unix.c (which shared-region check refused the cache)')
+    path, text = read(tree, 'bsd/vm/vm_unix.c')
+    if 'droidvm_sr_stage' in text:
+        print('  ok    already applied')
+    else:
+        new, applied = edit_006(text)
+        check('setup anchors found', applied,
+              'setup() definition / done label / vm_shared_region_map_file call changed')
+        check('stage recorder present', 'droidvm_sr_stage = 1; goto done;' in new,
+              'the goto-done instrumentation did not land')
+        check('vmkr recorder present', 'droidvm_sr_vmkr = (int)kr;' in new,
+              'the vm_shared_region_map_file recorder did not land')
         if applied:
             path.write_text(new)
 
