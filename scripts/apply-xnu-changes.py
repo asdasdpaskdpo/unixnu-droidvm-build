@@ -338,6 +338,110 @@ def edit_006(text):
     return text, True
 
 
+def edit_007(text):
+    """0007  osfmk/vm/vm_shared_region.c -- name the KERN_FAILURE in vm_shared_region_map_file().
+
+    run15 live read: sr_stage=0, sr_setup_error=0, sr_vmkr=5 (KERN_FAILURE).
+    So all 23 BSD-side checks passed and the refusal is in the VM layer.
+    In xnu-10063.141.1 only three sites in this path can produce KERN_FAILURE:
+      1  setup(): shared_region->sr_first_mapping != -1 ("caught race in map and slide")
+      2  setup(): copyin() failed with an errno other than EPERM/EACCES/EFAULT
+      3  map_file(): vm_shared_region_slide() failed (slide info sanity check
+         v1..v5, shared_region_pager_match(), etc.)
+    Also record setup's kr, slide's kr/index and the number of slide mappings.
+    All names start with droidvm_sr_ so tools/p3sr.py finds them via LC_SYMTAB.
+    """
+    # The definition is preceded by __attribute__((noinline)).  Anchor the whole
+    # prefix: inserting between the attribute and `static kern_return_t` breaks
+    # the declaration (the run14 failure mode).
+    definition = ('\n__attribute__((noinline))\n'
+                  'static kern_return_t\nvm_shared_region_map_file_setup(\n')
+    fn = text.find(definition)
+    if fn < 0:
+        definition = '\nstatic kern_return_t\nvm_shared_region_map_file_setup(\n'
+        fn = text.find(definition)
+    if fn < 0:
+        return text, False
+
+    globals_ = '''
+/* DroidVM 0007: live-readable recorders for the VM-side shared-region refusal. */
+int droidvm_sr_vmstage = 0;             /* 1=race, 2=copyin, 3=slide, 0=other */
+int droidvm_sr_vm_setup_kr = -1;
+int droidvm_sr_vm_slide_kr = -1;
+int droidvm_sr_vm_slide_index = -1;
+int droidvm_sr_vm_first_mapping = -2;
+int droidvm_sr_vm_slides = -1;
+
+'''
+    # Put the globals before `static kern_return_t`, never between the return
+    # type and the function name (run14 wasted 18 minutes on exactly that).
+    text = text[:fn + 1] + globals_ + text[fn + 1:]
+
+    a = '\t/*\n\t * Figure out how many of the mappings have slides.\n\t */\n'
+    if a not in text:
+        return text, False
+    reset = ('\tdroidvm_sr_vmstage = 0;\n'
+             '\tdroidvm_sr_vm_setup_kr = -1;\n'
+             '\tdroidvm_sr_vm_slide_kr = -1;\n'
+             '\tdroidvm_sr_vm_slide_index = -1;\n'
+             '\tdroidvm_sr_vm_first_mapping = -2;\n')
+    text = text.replace(a, reset + a, 1)
+
+    a = '\t/* Allocate per slide data structures */\n'
+    if a not in text:
+        return text, False
+    text = text.replace(a, '\tdroidvm_sr_vm_slides = (int)vmsr_num_slides;\n' + a, 1)
+
+    # 1: someone already mapped this shared region
+    a = ('\tif (shared_region->sr_first_mapping != -1) {\n'
+         '\t\tvm_shared_region_unlock();\n'
+         '#if DEVELOPMENT || DEBUG\n')
+    b = ('\tif (shared_region->sr_first_mapping != -1) {\n'
+         '\t\tvm_shared_region_unlock();\n'
+         '\t\tdroidvm_sr_vmstage = 1;\n'
+         '\t\tdroidvm_sr_vm_first_mapping = (int)shared_region->sr_first_mapping;\n'
+         '#if DEVELOPMENT || DEBUG\n')
+    if a not in text:
+        return text, False
+    text = text.replace(a, b, 1)
+
+    # 2: copyin() default branch
+    text, n = re.subn(r'(default:[ \t]*\n[ \t]*)kr = KERN_FAILURE;',
+                      r'\1droidvm_sr_vmstage = 2; kr = KERN_FAILURE;',
+                      text, count=1)
+    if n != 1:
+        return text, False
+
+    # setup() failed: remember its raw kr before bailing out
+    a = ('\tif (kr != KERN_SUCCESS) {\n'
+         '\t\tvm_shared_region_lock();\n'
+         '\t\tgoto done;\n'
+         '\t}\n'
+         '\tassert(vmsr_num_slides == mappings_to_slide_cnt);')
+    if a not in text:
+        return text, False
+    b = a.replace('\tif (kr != KERN_SUCCESS) {\n',
+                  '\tif (kr != KERN_SUCCESS) {\n\t\tdroidvm_sr_vm_setup_kr = (int)kr;\n', 1)
+    text = text.replace(a, b, 1)
+
+    # 3: vm_shared_region_slide() failed
+    a = '\t\tif (kr != KERN_SUCCESS) {\n\t\t\tSHARED_REGION_TRACE_ERROR(\n'
+    if a not in text:
+        return text, False
+    b = ('\t\tif (kr != KERN_SUCCESS) {\n'
+         '\t\t\tdroidvm_sr_vmstage = 3;\n'
+         '\t\t\tdroidvm_sr_vm_slide_kr = (int)kr;\n'
+         '\t\t\tdroidvm_sr_vm_slide_index = (int)i;\n'
+         '\t\t\tSHARED_REGION_TRACE_ERROR(\n')
+    text = text.replace(a, b, 1)
+
+    i = text.find('int droidvm_sr_vmstage = 0;')
+    print('    0007 insertion point:')
+    for ln in text[i - 100:i + 480].splitlines()[:14]:
+        print('      ' + ln)
+    return text, True
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit(__doc__)
@@ -415,6 +519,25 @@ def main():
               'the goto-done instrumentation did not land')
         check('vmkr recorder present', 'droidvm_sr_vmkr = (int)kr;' in new,
               'the vm_shared_region_map_file recorder did not land')
+        if applied:
+            path.write_text(new)
+
+    print('0007 osfmk/vm/vm_shared_region.c (which VM-side check returns KERN_FAILURE)')
+    path, text = read(tree, 'osfmk/vm/vm_shared_region.c')
+    if 'droidvm_sr_vmstage' in text:
+        print('  ok    already applied')
+    else:
+        new, applied = edit_007(text)
+        check('vm anchors found', applied,
+              'vm_shared_region_map_file_setup definition or one of the 0007 anchors changed')
+        check('race recorder present', 'droidvm_sr_vmstage = 1;' in new,
+              'the sr_first_mapping race recorder did not land')
+        check('copyin recorder present', 'droidvm_sr_vmstage = 2;' in new,
+              'the copyin KERN_FAILURE recorder did not land')
+        check('slide recorder present', 'droidvm_sr_vmstage = 3;' in new,
+              'the vm_shared_region_slide recorder did not land')
+        check('setup kr recorder present', 'droidvm_sr_vm_setup_kr = (int)kr;' in new,
+              'the setup kr recorder did not land')
         if applied:
             path.write_text(new)
 

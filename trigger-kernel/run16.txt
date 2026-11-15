@@ -1,0 +1,36 @@
+run16: name the VM-side check that returns KERN_FAILURE for dyld's shared cache
+
+Live read from run15 (kernel-20261115-r43665252974) on the K80, 2026-11-15 18:32,
+with the CI-built edk2 r1.a7903f0 firmware restored (the app's r49 firmware
+dies in VirtioGpuDxe with "split queue size 0 is not a power of 2"):
+
+  droidvm_sr_calls        = 2
+  droidvm_sr_files        = 54
+  droidvm_sr_mappings     = 62
+  droidvm_sr_result       = 22   (EINVAL)
+  droidvm_sr_stage        = 0    <- none of the 23 setup() goto-done branches fired
+  droidvm_sr_setup_error  = 0    <- shared_region_map_and_slide_setup() succeeded
+  droidvm_sr_vmkr         = 5    <- vm_shared_region_map_file() = KERN_FAILURE
+
+So every BSD-side check (root volume, SIP, preboot cryptex, code signing,
+UBC memory object, mapping fields) passed.  The refusal is inside the VM
+layer, and the tail of _shared_region_map_and_slide() maps KERN_FAILURE to
+EINVAL.  This retires the BSD-side hypotheses for good.
+
+0007 instruments osfmk/vm/vm_shared_region.c with live-readable recorders:
+  droidvm_sr_vmstage            1 = sr_first_mapping != -1 ("caught race")
+                                2 = copyin() default -> KERN_FAILURE
+                                3 = vm_shared_region_slide() failed
+                                0 = none of these
+  droidvm_sr_vm_setup_kr       raw kr from vm_shared_region_map_file_setup()
+  droidvm_sr_vm_slide_kr       raw kr from vm_shared_region_slide()
+  droidvm_sr_vm_slide_index    which slide mapping failed
+  droidvm_sr_vm_first_mapping  value seen at the race check
+  droidvm_sr_vm_slides         vmsr_num_slides
+
+All names start with droidvm_sr_ so tools/p3sr.py discovers them through
+LC_SYMTAB without any tool change.  Globals are inserted before the
+__attribute__((noinline)) prefix of vm_shared_region_map_file_setup(), verified
+locally against stock xnu-10063.141.1.
+
+Release still contains only kernel.macho + its sha256.  No workflow changes.
