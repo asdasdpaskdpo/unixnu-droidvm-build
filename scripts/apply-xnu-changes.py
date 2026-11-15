@@ -442,6 +442,57 @@ int droidvm_sr_vm_slides = -1;
     return text, True
 
 
+def edit_008(text):
+    """0008  osfmk/vm/vm_shared_region.c -- reuse an already-mapped shared region.
+
+    run16: vmstage=1, vm_setup_kr=5, vm_slides=4, sr_first_mapping=0xc5e0000.
+    setup() rolls sr_first_mapping back to -1 whenever a mapping fails
+    (vm_shared_region_undo_mappings()), and vm_shared_region_map_file() does the
+    same when slide fails.  A non-(-1) value therefore means the first
+    __shared_region_map_and_slide_2_np() completed successfully.  dyld then
+    calls it a second time; setup()'s "caught race in map and slide" guard
+    returns KERN_FAILURE, the BSD tail maps that to EINVAL(22), and dyld
+    concludes "no dyld cache" despite the cache being mapped.
+
+    XNU already treats a mapped region as reusable (see
+    vm_shared_region_start_address(): sr_first_mapping != -1 -> KERN_SUCCESS).
+    Short-circuit before setup() instead of failing.  Returning success from
+    inside setup() would be wrong: the caller then asserts
+    vmsr_num_slides == mappings_to_slide_cnt on a DEVELOPMENT kernel.
+
+    Keep all 0007 recorders; droidvm_sr_vmshort counts the short-circuits.
+    """
+    marker = 'int droidvm_sr_vm_slides = -1;\n'
+    if marker not in text:
+        return text, False
+    text = text.replace(marker, marker + 'int droidvm_sr_vmshort = 0;\n', 1)
+
+    anchor = ('\tdroidvm_sr_vmstage = 0;\n'
+              '\tdroidvm_sr_vm_setup_kr = -1;\n'
+              '\tdroidvm_sr_vm_slide_kr = -1;\n'
+              '\tdroidvm_sr_vm_slide_index = -1;\n'
+              '\tdroidvm_sr_vm_first_mapping = -2;\n')
+    if anchor not in text:
+        return text, False
+    short = ('\t/* DroidVM 0008: the first call already installed every mapping.\n'
+             '\t * dyld calls map_and_slide again here; rejecting it with\n'
+             '\t * KERN_FAILURE becomes EINVAL and dyld drops the cache.\n'
+             '\t * Reuse the existing region instead (same semantics as\n'
+             '\t * vm_shared_region_start_address()). Return before setup()\n'
+             '\t * so no lock / sr_mapping_in_progress state is held. */\n'
+             '\tif (shared_region->sr_first_mapping != (mach_vm_offset_t)-1) {\n'
+             '\t\tdroidvm_sr_vmshort++;\n'
+             '\t\treturn KERN_SUCCESS;\n'
+             '\t}\n\n')
+    text = text.replace(anchor, short + anchor, 1)
+
+    i = text.find('\t/* DroidVM 0008:')
+    print('    0008 short-circuit:')
+    for ln in text[i:i + 700].splitlines()[:16]:
+        print('      ' + ln)
+    return text, True
+
+
 def main():
     if len(sys.argv) != 2:
         sys.exit(__doc__)
@@ -538,6 +589,22 @@ def main():
               'the vm_shared_region_slide recorder did not land')
         check('setup kr recorder present', 'droidvm_sr_vm_setup_kr = (int)kr;' in new,
               'the setup kr recorder did not land')
+        if applied:
+            path.write_text(new)
+
+    print('0008 osfmk/vm/vm_shared_region.c (reuse an already-mapped shared region)')
+    path, text = read(tree, 'osfmk/vm/vm_shared_region.c')
+    if 'droidvm_sr_vmshort' in text:
+        print('  ok    already applied')
+    else:
+        new, applied = edit_008(text)
+        check('0007 recorders present', applied,
+              'run 0007 first: the 0008 anchor is the 0007 reset block')
+        check('short-circuit present',
+              'shared_region->sr_first_mapping != (mach_vm_offset_t)-1' in new,
+              'the reuse branch did not land')
+        check('short-circuit counter present', 'droidvm_sr_vmshort++;' in new,
+              'the short-circuit counter did not land')
         if applied:
             path.write_text(new)
 

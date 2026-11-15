@@ -1,0 +1,39 @@
+run17: reuse the already-mapped shared region instead of failing dyld
+
+run16 (kernel-20261115-r43705050575) live read on the K80, 2026-11-15 19:00:
+
+  sr_calls=2  files=54  mappings=62  result=22 (EINVAL)
+  sr_stage=0  sr_setup_error=0          <- all 23 BSD checks passed
+  sr_vmkr=5                             <- KERN_FAILURE
+  sr_vmstage=1                          <- "caught race in map and slide"
+  sr_vm_setup_kr=5  sr_vm_slide_kr=-1  <- failed inside setup(), never reached slide
+  sr_vm_first_mapping=207486976 (0xc5e0000)
+  sr_vm_slides=4
+
+sr_first_mapping is set at vm_shared_region_map_file_setup() line ~1845
+while installing the first mapping, and is reset to -1 by
+vm_shared_region_undo_mappings() on EVERY setup() failure; the main function
+also calls undo_mappings() when vm_shared_region_slide() fails.  A non-(-1)
+value therefore proves the FIRST __shared_region_map_and_slide_2_np() call
+completed successfully and installed all 62 mappings.
+
+dyld then calls map_and_slide a second time.  setup()'s guard
+  if (shared_region->sr_first_mapping != -1) return KERN_FAILURE;
+rejects the repeat, the BSD tail converts KERN_FAILURE to EINVAL(22), and
+dyld concludes "no dyld cache" even though the cache is already mapped.
+
+0008 short-circuits vm_shared_region_map_file() before setup() when the
+region is already mapped, returning KERN_SUCCESS (the same "reuse" semantics
+as vm_shared_region_start_address()).  It must return before setup(), not
+from inside it: the DEVELOPMENT kernel asserts
+vmsr_num_slides == mappings_to_slide_cnt after setup() returns success.
+At that point no lock is held and sr_mapping_in_progress is THREAD_NULL, so
+the done: cleanup is not needed.
+
+Also keeps all 0007 recorders and adds droidvm_sr_vmshort (short-circuit count).
+Expected on the phone: droidvm_sr_vmshort >= 1 and droidvm_sr_result == 0.
+If dyld then gets its cache this unblocks userspace (launchd -> SpringBoard),
+which is the actual goal; if it still reports "no dyld cache" the second call
+carried different mappings and we instrument that next.
+
+Release still contains only kernel.macho + its sha256.  No workflow changes.
