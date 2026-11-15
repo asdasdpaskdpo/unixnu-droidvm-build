@@ -269,11 +269,24 @@ def edit_006(text):
     branch index, the errno setup() returned, and the raw kern_return_t -- all plain
     assignments to file-scope ints, readable live from guest RAM after boot.
     """
-    definition = '\nshared_region_map_and_slide_setup(\n'
-    fn_start = text.find(definition)
-    fn_end = text.find('\n_shared_region_map_and_slide(', fn_start)
-    if fn_start < 0 or fn_end < 0:
+    # Anchor on the whole "static int\n<name>(" pair.  Inserting just before the name would
+    # put the globals between `static int` and the function name -- a syntax error that only
+    # shows up 18 minutes later as a make recursion error with no diagnostic (43662467314).
+    # If UniXNU's tree spells the return-type line differently, step back one whole line from
+    # the name instead; either way the globals land at file scope, before the definition.
+    name_only = '\nshared_region_map_and_slide_setup(\n'
+    definition = '\nstatic int' + name_only
+    name_at = text.find(name_only)
+    fn_end = text.find('\n_shared_region_map_and_slide(', name_at)
+    if name_at < 0 or fn_end < 0:
         return text, False
+    exact = text.find(definition)
+    if exact >= 0:
+        insert_at = exact + 1
+        print('    0006 globals: exact "static int" anchor')
+    else:
+        insert_at = text.rfind('\n', 0, name_at) + 1
+        print('    0006 globals: fallback, line above the function name')
 
     globals_ = (
         '/*\n'
@@ -287,10 +300,15 @@ def edit_006(text):
         'int droidvm_sr_vmkr = -1;\n'
         '\n'
     )
-    text = text[:fn_start + 1] + globals_ + text[fn_start + 1:]
+    text = text[:insert_at] + globals_ + text[insert_at:]
 
-    # Recompute the span: the comment above mentions setup() but not the definition line.
-    fn_start = text.find(definition)
+    # Prove in the CI log that the globals were not placed between the return type and the
+    # function name.  run14's only symptom was a make recursion error with no diagnostic.
+    for line in text[insert_at:insert_at + 360].splitlines()[:12]:
+        print('    0006 | ' + line)
+
+    # Recompute the span from the function name (the comment above does not contain that line).
+    fn_start = text.find(name_only)
     fn_end = text.find('\n_shared_region_map_and_slide(', fn_start)
     span = text[fn_start:fn_end]
     counter = [0]

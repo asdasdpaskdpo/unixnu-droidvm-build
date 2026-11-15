@@ -1,0 +1,29 @@
+run15: fix the 0006 build error, keep the stage numbering
+
+run14 (43662467314) generated a correct patch -- all 23 `goto done` sites were
+numbered and every self-check passed -- but the kernel did not compile.  Its
+0006 insertion point was the newline just before the function *name*, which put
+the three file-scope ints between `static int` and
+`shared_region_map_and_slide_setup(`:
+
+    static int
+    int droidvm_sr_stage = 0;          <-- syntax error
+    shared_region_map_and_slide_setup(
+
+The CI log only shows the make recursion error, because the compiler diagnostic
+is inside the build script's own kernel.log, not the step output.
+
+Fix: anchor on the whole "static int\n<name>(" pair, with a fallback that steps
+back one whole line from the name if this tree spells the return type differently.
+The script now also prints the generated prologue into the build log, so a bad
+insertion is visible at the patch step (about a minute in) instead of 18 minutes
+later at link time.  Locally verified on xnu-10063.141.1: the globals are before
+`static int`, all 23 stage assignments stay inside braced blocks, and the stage
+map is byte-for-byte the same as run14's.  So run14's stage map still decodes
+run15's droidvm_sr_stage.
+
+On the phone the run13 kernel reads sr=2(f54/m62)=22 (EINVAL).  Stage and
+droidvm_sr_vmkr will name the exact check; stage 6 (root_dir mismatch, EPERM)
+and the code-signature direction have already been excluded on hardware.
+
+Still only kernel.macho plus its sha256 in the release.  No workflow changes.
