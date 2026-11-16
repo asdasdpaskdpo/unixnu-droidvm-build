@@ -221,6 +221,18 @@ jobs:
           print('boringssl modules opened up:', changed or 'none found')
           PY
 
+      - name: Swap for the soong and rustc peak
+        # Two runs died without a log or a post step (exit 143 at 4 min, then at 63 min): the runner
+        # itself goes away under the compile's memory peak, so give it somewhere to page.
+        if: inputs.stage == 'full'
+        run: |
+          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -m
+          df -h /
+
       - name: Build crosvm_device_only
         if: inputs.stage == 'full'
         run: |
