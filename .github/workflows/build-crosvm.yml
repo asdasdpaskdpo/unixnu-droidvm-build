@@ -176,6 +176,22 @@ jobs:
         if: inputs.stage == 'full'
         run: bash "${{ github.workspace }}/scripts/build_shim.sh" "$AOSP"
 
+      - name: Broaden boringssl visibility for the crosvm fork's libdatachannel
+        # soong: module "libdatachannel_srtp" variant "linux_glibc_x86_64_static" depends on
+        # //external/boringssl:libcrypto_static which is not visible to this module (run 43742742179).
+        # The pinned boringssl lists its dependents; widen every visibility list to public.
+        if: inputs.stage == 'full'
+        run: |
+          cd "$AOSP"
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path('external/boringssl/Android.bp')
+          s = p.read_text()
+          new = re.sub(r'visibility:\s*\[[^\]]*\]', 'visibility: ["//visibility:public"]', s)
+          print('changed' if new != s else 'no visibility list found', 'in', p)
+          p.write_text(new)
+          PY
+
       - name: Build crosvm_device_only
         if: inputs.stage == 'full'
         run: |
