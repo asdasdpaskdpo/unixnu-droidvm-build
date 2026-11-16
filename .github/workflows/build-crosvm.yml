@@ -179,17 +179,34 @@ jobs:
       - name: Broaden boringssl visibility for the crosvm fork's libdatachannel
         # soong: module "libdatachannel_srtp" variant "linux_glibc_x86_64_static" depends on
         # //external/boringssl:libcrypto_static which is not visible to this module (run 43742742179).
-        # The pinned boringssl lists its dependents; widen every visibility list to public.
+        # Widen the visibility of the boringssl crypto/ssl libraries only: a blanket rewrite also hit
+        # trusty_dirgroup_external_boringssl and tripped its neverallow (run 43825725301).
         if: inputs.stage == 'full'
         run: |
           cd "$AOSP"
           python3 - <<'PY'
           import pathlib, re
           p = pathlib.Path('external/boringssl/Android.bp')
-          s = p.read_text()
-          new = re.sub(r'visibility:\s*\[[^\]]*\]', 'visibility: ["//visibility:public"]', s)
-          print('changed' if new != s else 'no visibility list found', 'in', p)
-          p.write_text(new)
+          lines = p.read_text().splitlines(keepends=True)
+          targets = {'libcrypto', 'libcrypto_static', 'libssl', 'libssl_static', 'boringssl_defaults'}
+          out, i, changed = [], 0, []
+          while i < len(lines):
+            line = lines[i]
+            if line.rstrip().endswith('{') and not line.startswith((' ', '\t')):
+              block, depth, j = [line], 1, i + 1
+              while j < len(lines) and depth:
+                depth += lines[j].count('{') - lines[j].count('}')
+                block.append(lines[j]); j += 1
+              text = ''.join(block)
+              m = re.search(r'name:\s*"([^"]+)"', text)
+              if m and m.group(1) in targets:
+                new = re.sub(r'visibility:\s*\[[^\]]*\]', 'visibility: ["//visibility:public"]', text)
+                if new != text:
+                  changed.append(m.group(1)); block = new.splitlines(keepends=True)
+              out.extend(block); i = j; continue
+            out.append(line); i += 1
+          p.write_text(''.join(out))
+          print('boringssl visibility widened for:', changed or 'none found')
           PY
 
       - name: Build crosvm_device_only
