@@ -205,6 +205,34 @@ jobs:
           echo "--- device-ref EXTRA_LD_ARCHIVES (must be empty) ---" | tee -a "$RUNNER_TEMP/overlay.log"
           grep -n 'EXTRA_LD_ARCHIVES' device-ref/configs/${BOARD}_defconfig | tee -a "$RUNNER_TEMP/overlay.log"
 
+      - name: Publish AppleARMIODevice nubs (display fix)
+        # IOMobileFramebufferLegacy::start refuses a provider that is not an AppleARMIODevice, and this
+        # platform expert publishes plain IOPlatformDevice nubs for /arm-io children, so the guest never
+        # gets a frame buffer (kernel log: "provider was not AppleARMIODevice"). AppleARMPlatform normally
+        # supplies that class; it is in the kernelcache, so allocate it by name and fall back on failure.
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          p = pathlib.Path('UniXNU/drivers/ArmDTPlatform/ArmDTPlatform.cpp')
+          s = p.read_text()
+          if 'createNub (IORegistryEntry' in s:
+            print('already patched'); raise SystemExit
+          s = s.replace("  bool configure (IOService *provider) override;",
+                        "  bool configure (IOService *provider) override;\n  IOService *createNub (IORegistryEntry *from) override;")
+          impl = """IOService *ArmDTPlatform::createNub (IORegistryEntry *from)
+          {
+            IOService *nub = OSMetaClass::allocClassWithName ("AppleARMIODevice");
+            if (nub && !nub->init (from)) { nub->release (); nub = nullptr; }
+            if (nub) return nub;
+            return IODTPlatformExpert::createNub (from);
+          }
+
+          """
+          s = s.replace("bool ArmDTPlatform::createDeviceNubs (IOService *provider)", impl + "bool ArmDTPlatform::createDeviceNubs (IOService *provider)")
+          p.write_text(s)
+          print('patched', p)
+          PY
+
       - name: Cache the Apple source feed
         uses: actions/cache@v4
         with:
@@ -341,6 +369,31 @@ jobs:
         with:
           name: droidvm-release-enc
           path: ${{ runner.temp }}/droidvm-release.tgz.enc
+          compression-level: 0
+          retention-days: 7
+
+      - name: Pack the kernel alone
+        id: packk
+        if: always() && env.STAGE == 'full'
+        working-directory: UniXNU-droidvm
+        env:
+          ARTIFACT_KEY: ${{ secrets.ARTIFACT_KEY }}
+        run: |
+          K=../UniXNU/out/droidvm/kernel/kernel.macho
+          [ -f "$K" ] || K=out/droidvm/kernel/kernel.macho
+          ls -l "$K" || true
+          if [ -f "$K" ] && [ -n "$ARTIFACT_KEY" ]; then
+            tar czf "$RUNNER_TEMP/kernel-only.tgz" -C "$(dirname "$K")" "$(basename "$K")"
+            openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ARTIFACT_KEY -in "$RUNNER_TEMP/kernel-only.tgz" -out "$RUNNER_TEMP/kernel-only.tgz.enc"
+            echo "ok=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload the kernel alone (encrypted)
+        if: always() && steps.packk.outputs.ok == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-only-enc
+          path: ${{ runner.temp }}/kernel-only.tgz.enc
           compression-level: 0
           retention-days: 7
 
