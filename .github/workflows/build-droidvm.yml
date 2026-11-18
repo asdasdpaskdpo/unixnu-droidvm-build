@@ -218,13 +218,14 @@ jobs:
           if 'createNub (IORegistryEntry' in s:
             print('already patched'); raise SystemExit
           s = s.replace("  bool configure (IOService *provider) override;",
-                        "  bool configure (IOService *provider) override;\n  IOService *createNub (IORegistryEntry *from) override;")
-          impl = """IOService *ArmDTPlatform::createNub (IORegistryEntry *from)
+                        "  bool configure (IOService *provider) override;\n  IOPlatformDevice *createNub (IORegistryEntry *from) override;")
+          impl = """IOPlatformDevice *ArmDTPlatform::createNub (IORegistryEntry *from)
           {
-            IOService *nub = OSMetaClass::allocClassWithName ("AppleARMIODevice");
+            IOPlatformDevice *nub = OSDynamicCast (IOPlatformDevice,
+                                                   OSMetaClass::allocClassWithName ("AppleARMIODevice"));
             if (nub && !nub->init (from)) { nub->release (); nub = nullptr; }
             if (nub) return nub;
-            return IODTPlatformExpert::createNub (from);
+            return (IOPlatformDevice *) IODTPlatformExpert::createNub (from);
           }
 
           """
