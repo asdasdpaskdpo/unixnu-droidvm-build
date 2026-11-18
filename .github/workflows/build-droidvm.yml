@@ -223,7 +223,7 @@ jobs:
           {
             IOPlatformDevice *nub = OSDynamicCast (IOPlatformDevice,
                                                    OSMetaClass::allocClassWithName ("AppleARMIODevice"));
-            if (nub && !nub->init (from)) { nub->release (); nub = nullptr; }
+            if (nub && !nub->init (from, gIODTPlane)) { nub->release (); nub = nullptr; }
             if (nub) return nub;
             return (IOPlatformDevice *) IODTPlatformExpert::createNub (from);
           }
