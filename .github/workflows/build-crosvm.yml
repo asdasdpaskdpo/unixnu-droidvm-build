@@ -222,16 +222,26 @@ jobs:
           PY
 
       - name: Swap for the soong and rustc peak
-        # Two runs died without a log or a post step (exit 143 at 4 min, then at 63 min): the runner
-        # itself goes away under the compile's memory peak, so give it somewhere to page.
+        # Two runs died with no log and no post step (exit 143 at 4 min, then at 63 min): the runner
+        # goes away under the compile's memory peak. Try to give it a swapfile, but never fail the
+        # job over it (the first version of this step did: run 43858767330).
         if: inputs.stage == 'full'
         run: |
-          sudo fallocate -l 16G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=16384
+          set +e
+          sudo swapoff -a 2>/dev/null
+          sudo rm -f /swapfile
+          sudo fallocate -l 16G /swapfile; echo "fallocate=$?"
+          if [ ! -s /swapfile ]; then
+            sudo rm -f /swapfile
+            sudo dd if=/dev/zero of=/swapfile bs=1M count=16384 status=none; echo "dd=$?"
+          fi
           sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-          free -m
-          df -h /
+          sudo mkswap /swapfile; echo "mkswap=$?"
+          sudo swapon /swapfile; echo "swapon=$?"
+          swapon --show || true
+          free -m || true
+          df -h / || true
+          exit 0
 
       - name: Build crosvm_device_only
         if: inputs.stage == 'full'
